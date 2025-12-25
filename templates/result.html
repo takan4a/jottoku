@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>ピクロス問題と一意性チェック結果</title>
+    <style>
+        /* --- 基本レイアウト --- */
+        body { 
+            font-family: sans-serif; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            flex-direction: column; 
+            margin-top: 30px;
+            background-color: #f8f9fa;
+        }
+        h1 { color: #007bff; margin-bottom: 5px; }
+        .result-container { 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            margin-top: 20px;
+        }
+        
+        /* --- 一意性チェック結果 --- */
+        .unicity-box {
+            padding: 15px 30px;
+            margin: 20px 0;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: bold;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .unique { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .multiple { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+        .nosolution { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .error { background-color: #e2e3e5; color: #383d41; border: 1px solid #d6d8db; }
+
+        /* --- グリッドとヒントの配置 --- */
+        .nonogram-table {
+            display: flex;
+        }
+        
+        /* 角の空白セル */
+        .corner-cell {
+            /* 最大の列ヒントの数だけ高さを確保 */
+            height: 100px; 
+            /* 最大の行ヒントの数だけ幅を確保 */
+            width: 100px; 
+            box-sizing: border-box;
+        }
+        
+        /* 列のヒントエリア */
+        .col-hints-area {
+            display: flex; 
+            flex-direction: row;
+            border-bottom: 2px solid #333; /* グリッドとの区切り線 */
+            padding-bottom: 2px;
+        }
+        /* 行のヒントエリア */
+        .row-hints-area {
+            border-right: 2px solid #333; /* グリッドとの区切り線 */
+            padding-right: 2px;
+        }
+
+
+        /* --- グリッド（本盤面） --- */
+        table.grid-main { 
+            border-collapse: collapse; 
+            table-layout: fixed; /* セルの幅を固定 */
+        }
+        .grid-cell { 
+            width: 15px; 
+            height: 15px; 
+            border: 1px solid #ccc; 
+            box-sizing: border-box;
+        }
+        .black-cell { 
+            background-color: black; 
+        }
+        
+        /* --- ヒントのスタイリング --- */
+        /* 列ヒント（縦並び） */
+        .col-hint-row {
+            display: flex;
+            flex-direction: column-reverse; /* 下から上に詰める */
+            align-items: center;
+            width: 15px; /* グリッドセルと同じ幅 */
+        }
+        .col-hint-cell {
+            font-size: 10px;
+            line-height: 1.2;
+            padding: 1px 0;
+            height: 15px; /* 縦のヒントセルもグリッドセルと同じ高さ */
+        }
+        
+        /* 行ヒント（横並び） */
+        .row-hints { 
+            display: flex;
+            align-items: center;
+            justify-content: flex-end; /* 右寄せ */
+            height: 15px; /* グリッドセルと同じ高さ */
+            padding-right: 5px;
+        }
+        .row-hints span {
+            font-size: 10px;
+            margin-left: 3px;
+            white-space: nowrap;
+        }
+        
+    </style>
+</head>
+<body>
+    <h1>ピクロス問題が完成しました！ 🎉</h1>
+    <p>画像処理後の **{{ width }}x{{ height }}** グリッドの結果とヒントです。</p>
+
+    <div class="unicity-box 
+        {% if unicity == 'Unique' %}unique{% elif unicity == 'Multiple' %}multiple{% elif unicity == 'NoSolution' %}nosolution{% else %}error{% endif %}">
+        
+        {% if unicity == 'Unique' %}
+            ✅ このヒントを持つパズルの解は**一意**です。
+        {% elif unicity == 'Multiple' %}
+            ⚠️ このヒントを持つパズルの解は**複数**存在します。
+        {% elif unicity == 'NoSolution' %}
+            ❌ このヒントを持つパズルには**解が存在しません**。
+        {% elif unicity == 'Error: SugarまたはMiniSATが見つかりません。PATHを確認してください。' %}
+            ⚙️ **エラー:** SugarまたはMiniSATが見つかりません。
+        {% else %}
+            ⚙️ **エラー:** 判定不能 ({{ unicity }})
+        {% endif %}
+    </div>
+
+    <div class="nonogram-table">
+        
+        <div class="corner-cell"></div>
+
+        <div class="col-hints-area">
+            {% for hints in col_hints %}
+                <div class="col-hint-row">
+                    {% for hint in hints|reverse %} 
+                        <span class="col-hint-cell">{{ hint }}</span>
+                    {% endfor %}
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+    
+    <div class="nonogram-table">
+        <div class="row-hints-area">
+            <table>
+                <tbody>
+                    {% for hints in row_hints %}
+                        <tr>
+                            <td class="row-hints">
+                                {% for hint in hints %}
+                                    <span>{{ hint }}</span>
+                                {% endfor %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <table class="grid-main">
+            <tbody>
+                {% for y in range(height) %}
+                    <tr>
+                        {% for x in range(width) %}
+                            <td class="grid-cell {% if grid[y][x] == 1 %}black-cell{% endif %}"></td>
+                        {% endfor %}
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    
+    <hr>
+    <a href="/">↩️ 別の画像をアップロードする</a>
+
+</body>
+</html>

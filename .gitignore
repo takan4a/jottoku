@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.vscode/
+.idea/
+*.log
+uploads/
+node_modules/
+*.class
+*.jar
+target/
