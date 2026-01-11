@@ -21,9 +21,10 @@ LATEST_COL_HINTS = None
 LATEST_WIDTH = None
 LATEST_HEIGHT = None
 LATEST_GRAY_IMAGE = None
+LATEST_BINARY_IMAGE = None  # 元の二値化画像（解となる画像）
 
 # ------------------------- 画像処理関数 -------------------------
-def process_image(image_stream, size=(30, 30)):
+def process_image(image_stream, size=(2, 2)):
     input_bytes = image_stream.read()
     # rembg は重い依存があるため遅延インポートする（テスト時の副作用軽減）
     try:
@@ -271,9 +272,12 @@ def run_sugar_with_constraints(row_hints, col_hints, width, height, extra_constr
 
 # ------------------------- solve / adapt_puzzle / count_unknowns -------------------------
 def solve(current_image):
-    """簡易ソルバー: グローバルに保存された最新ヒントを用い、各マスが強制されるかを判定する。
-    返り値は同形の numpy 配列で、確定値は 0/1、未確定は -1 を返す。
-    注意: 小さなパズル向けの単純実装（各マスごとに2回SATチェック）。"""
+    """
+    Sugarソルバーを使用して、各マスが論理的推論で確定可能かを判定
+
+    current_image: 現在の固定セル（0=固定なし, 1=黒マス固定）
+    返り値: numpy配列 (0=白確定, 1=黒確定, -1=未確定)
+    """
     global LATEST_ROW_HINTS, LATEST_COL_HINTS, LATEST_WIDTH, LATEST_HEIGHT
 
     # ヒントが未保存の場合は、現在のグリッドをそのまま返す（未確定扱い）
@@ -288,9 +292,10 @@ def solve(current_image):
     height = LATEST_HEIGHT
     width = LATEST_WIDTH
 
+    # 初期化: 既に黒マスとして固定されているセルは1、それ以外は未確定
     solution = np.full((height, width), -1, dtype=int)
 
-    # 現在黒マスになっているセルは追加制約として扱う
+    # current_imageで既に黒マスになっているセルを制約として扱う
     forced_black_constraints = []
     for y in range(height):
         for x in range(width):
@@ -333,15 +338,32 @@ def count_unknowns(solution):
     return int((solution == -1).sum())
 
 
-def adapt_puzzle(current_image, original_gray_image=None, alpha=8.0, beta=1.0):
+def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=None, alpha=8.0, beta=1.0):
     """
-    Algorithm 5: AdaptPuzzle の実装
-    current_image: 現在の白黒パズル (0:白, 1:黒)
-    original_gray_image: 元のグレースケール画像 (0:黒 〜 255:白)。Noneの場合はグローバル変数から取得
-    """
-    global LATEST_GRAY_IMAGE
+    論文の正しいAdaptPuzzleアルゴリズム (Algorithm 5)
 
-    # グレースケール画像が指定されていない場合はグローバル変数から取得
+    current_image: 現在の固定セル (0:固定なし, 1:黒マス固定)
+    original_binary_image: 元の二値化画像（解となる画像） (0:白, 1:黒)
+    original_gray_image: 元のグレースケール画像 (0:黒 〜 255:白)
+    alpha: 未確定マス数の重み
+    beta: グレースケール濃度の重み
+
+    アルゴリズム:
+    1. solve()で現在のパズルにおける確定/未確定マスを判定
+    2. 未確定マス（P_ij = -1）かつ元画像で白マス（I_ij = 0）のマスを列挙
+    3. 各候補マスを黒マスに固定した場合、solve()を実行して未確定マス数を計算
+    4. Value = α×未確定マス数 + β×グレースケール濃度 を計算
+    5. 最小Valueのマスを選択し、黒マスに固定
+    """
+    global LATEST_GRAY_IMAGE, LATEST_BINARY_IMAGE
+
+    # 元画像を取得
+    if original_binary_image is None:
+        original_binary_image = LATEST_BINARY_IMAGE
+        if original_binary_image is None:
+            print("Error: 元の二値化画像が利用できません")
+            return current_image
+
     if original_gray_image is None:
         original_gray_image = LATEST_GRAY_IMAGE
         if original_gray_image is None:
@@ -351,51 +373,68 @@ def adapt_puzzle(current_image, original_gray_image=None, alpha=8.0, beta=1.0):
     # 現在の状態をコピーして作業
     current_image = current_image.copy()
 
+    # 現在の確定/未確定マスを判定（論理的推論による）
+    print("現在のパズル状態を解析中...")
     current_solution = solve(current_image)
-
-    # すでに全てのマスが確定していれば終了
-    if count_unknowns(current_solution) == 0:
-        return current_image
-
-    best_cell = None
-    min_value = float('inf')
+    num_unknowns = count_unknowns(current_solution)
+    print(f"現在の未確定マス数: {num_unknowns}")
 
     height, width = current_image.shape
 
+    # 候補マスを列挙: 未確定（P_ij = -1）かつ元画像で白マス（I_ij = 0）
+    candidates = []
     for y in range(height):
         for x in range(width):
-            # 条件: 現在白マスかつソルバーが未確定
-            if current_image[y][x] == 0 and current_solution[y][x] == -1:
-                # 一時的に黒にして試す（コピーを作成）
-                test_image = current_image.copy()
-                test_image[y][x] = 1
-                simulated_solution = solve(test_image)
-                num_unknowns = count_unknowns(simulated_solution)
+            # 論文の条件: P_ij = x (未確定) AND I_ij = 0 (元画像で白)
+            if current_solution[y][x] == -1 and original_binary_image[y][x] == 0:
+                candidates.append((y, x))
 
-                pixel_intensity = int(original_gray_image[y][x])
+    if not candidates:
+        print("候補マスが見つかりません（全てのマスが確定済み、または元画像が全て黒マス）")
+        return current_image
 
-                value = (alpha * num_unknowns) + (beta * pixel_intensity)
+    print(f"候補マス数: {len(candidates)}")
 
-                if value < min_value:
-                    min_value = value
-                    best_cell = (y, x)
+    # 各候補マスについてValueを計算
+    best_cell = None
+    min_value = float('inf')
+
+    for y, x in candidates:
+        # このマスを黒マスに固定して、未確定マス数を計算
+        test_image = current_image.copy()
+        test_image[y][x] = 1
+
+        # solve()を実行して未確定マス数を計算
+        test_solution = solve(test_image)
+        test_unknowns = count_unknowns(test_solution)
+
+        # グレースケール濃度（暗いほど小さい値）
+        pixel_intensity = int(original_gray_image[y][x])
+
+        # Value関数: α×未確定マス数 + β×ピクセル濃度
+        value = alpha * test_unknowns + beta * pixel_intensity
+
+        if value < min_value:
+            min_value = value
+            best_cell = (y, x)
+
+        # デバッグ出力（最初の数個のみ）
+        if len(candidates) <= 10:
+            print(f"  候補 ({x}, {y}): 未確定数={test_unknowns}, 濃度={pixel_intensity}, Value={value:.1f}")
 
     if best_cell:
         best_y, best_x = best_cell
         current_image[best_y][best_x] = 1
-        print(f"Selected cell ({best_x}, {best_y}) with score {min_value:.1f}")
+        print(f"選択: ({best_x}, {best_y}), Value={min_value:.1f}")
 
         # 選択後にヒント違反がないか確認
         test_grid = [[int(current_image[y,x]) for x in range(width)] for y in range(height)]
         test_row_hints, test_col_hints = get_hints(test_grid)
+        global LATEST_ROW_HINTS, LATEST_COL_HINTS
         if test_row_hints != LATEST_ROW_HINTS or test_col_hints != LATEST_COL_HINTS:
             print(f"警告: ヒントが変化しました")
-            print(f"  元の行ヒント: {LATEST_ROW_HINTS}")
-            print(f"  新しい行ヒント: {test_row_hints}")
-            print(f"  元の列ヒント: {LATEST_COL_HINTS}")
-            print(f"  新しい列ヒント: {test_col_hints}")
     else:
-        print("変更可能な候補がありません（エラーまたは完了）")
+        print("変更可能な候補がありません")
 
     return current_image
 
@@ -409,20 +448,25 @@ def upload_file():
         if file.filename == '':
             return 'ファイルが選択されていません'
 
-        img, img_gray = process_image(file.stream, size=(30, 30))
+        img, img_gray = process_image(file.stream, size=(2, 2))
         if img is None:
             return '無効な画像ファイルです'
 
         height, width = img.shape
         grid = [[0 if img[y,x]!=0 else 1 for x in range(width)] for y in range(height)]
         row_hints, col_hints = get_hints(grid)
+
+        # 元の二値化画像を保存（解となる画像: 0=白, 1=黒）
+        binary_image = np.array(grid, dtype=int)
+
         # 保存しておく（adapt_puzzle / solve で利用）
-        global LATEST_ROW_HINTS, LATEST_COL_HINTS, LATEST_WIDTH, LATEST_HEIGHT, LATEST_GRAY_IMAGE
+        global LATEST_ROW_HINTS, LATEST_COL_HINTS, LATEST_WIDTH, LATEST_HEIGHT, LATEST_GRAY_IMAGE, LATEST_BINARY_IMAGE
         LATEST_ROW_HINTS = row_hints
         LATEST_COL_HINTS = col_hints
         LATEST_HEIGHT = height
         LATEST_WIDTH = width
         LATEST_GRAY_IMAGE = img_gray
+        LATEST_BINARY_IMAGE = binary_image
         csp_filename = os.path.join(app.config['UPLOAD_FOLDER'], 'problem.csp')
         unicity_result = check_unicity(row_hints, col_hints, width, height, csp_filename)
 
@@ -445,14 +489,26 @@ def upload_file():
                     LATEST_ROW_HINTS = row_hints
                     LATEST_COL_HINTS = col_hints
 
-                    # adapt_puzzle を実行（固定セルを渡す）
+                    # adapt_puzzle を実行（固定セル、元の二値化画像、グレースケール画像を渡す）
                     previous_fixed = fixed_cells.copy()
-                    fixed_cells = adapt_puzzle(fixed_cells, img_gray)
+                    fixed_cells = adapt_puzzle(fixed_cells, binary_image, img_gray)
 
-                    # 固定セルに変化がない場合はエラー
+                    # 固定セルに変化がない場合
                     if np.array_equal(fixed_cells, previous_fixed):
-                        print("エラー: adapt_puzzle が変更を加えませんでした")
-                        adaptation_log.append({'error': '適応停止（変更なし）'})
+                        # 一意性をチェック（全マス確定なら一意解の可能性）
+                        final_unicity = check_unicity(row_hints, col_hints, width, height, csp_filename, fixed_cells)
+                        if final_unicity == "Unique":
+                            print(f"一意解を達成しました（{iteration + 1} 回の適応）")
+                            grid = [[int(fixed_cells[y,x]) for x in range(width)] for y in range(height)]
+                            unicity_result = "Unique"
+                            adaptation_log.append({
+                                'iteration': iteration + 1,
+                                'unicity': 'Unique',
+                                'black_cells': int(np.sum(fixed_cells))
+                            })
+                        else:
+                            print(f"警告: 変更なしで終了（一意性: {final_unicity}）")
+                            adaptation_log.append({'warning': f'変更なし（一意性: {final_unicity}）'})
                         break
 
                     # 一意性を再チェック（元のヒント + 固定セル制約で）
