@@ -2,11 +2,12 @@ import os
 from flask import Flask, render_template, request
 import cv2
 import numpy as np
-from PIL import Image
+from rembg import remove
 import io
 import subprocess
 import re
 import tempfile
+
 
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
@@ -22,36 +23,35 @@ LATEST_WIDTH = None
 LATEST_HEIGHT = None
 LATEST_GRAY_IMAGE = None
 LATEST_BINARY_IMAGE = None  # 元の二値化画像（解となる画像）
+NONOGRAM_SIZE = (2, 2)  # デフォルトのパズルサイズ
 
 # ------------------------- 画像処理関数 -------------------------
-def process_image(image_stream, size=(2, 2)):
+def process_image(image_stream, size=NONOGRAM_SIZE):
     input_bytes = image_stream.read()
-    # rembg は重い依存があるため遅延インポートする（テスト時の副作用軽減）
-    try:
-        from rembg import remove
-        out_bytes = remove(input_bytes)
-    except Exception:
-        # rembg が利用できない場合は入力をそのまま使う
-        out_bytes = input_bytes
-    img_pil = Image.open(io.BytesIO(out_bytes)).convert("RGBA")
-    img_np_rgba = np.array(img_pil)
-    img_np_rgb = img_np_rgba[:, :, :3]
-    img_np_gray = cv2.cvtColor(img_np_rgb, cv2.COLOR_RGB2GRAY)
-    alpha_channel = img_np_rgba[:, :, 3]
+    img_np = cv2.imdecode(np.frombuffer(input_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
+    img_np_removed = remove(img_np)
+    
+    img_np_rgb = img_np_removed[:, :, :3]
+    img_np_gray = cv2.cvtColor(img_np_rgb, cv2.COLOR_BGR2GRAY)
+    
+    alpha_channel = img_np_removed[:, :, 3]
     object_mask = (alpha_channel > 0).astype(np.uint8) * 255
-    img_masked_gray = np.where(object_mask == 255, img_np_gray, 255)
-    img_blur = cv2.medianBlur(img_masked_gray, 5)
-    img_binary = cv2.adaptiveThreshold(img_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, 11, 2)
-    img_resized_gray = cv2.resize(img_binary, size, interpolation=cv2.INTER_AREA)
+    img_np_masked = np.where(object_mask == 255, img_np_gray, 255)
 
-    # グレースケール画像を保存（adapt_puzzle用）
-    img_resized_gray_for_adapt = cv2.resize(img_masked_gray, size, interpolation=cv2.INTER_AREA)
+    # グレースケール画像をリサイズ（adapt_puzzle用）
+    img_resized_gray = cv2.resize(img_np_masked, size, interpolation=cv2.INTER_AREA)
 
+    # リサイズしたグレースケール画像を二値化
     img_processed = cv2.adaptiveThreshold(img_resized_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                           cv2.THRESH_BINARY, 11, 2)
+    
+    # 各画像を保存（デバッグ用）
+    cv2.imwrite(os.path.join(app.config['UPLOAD_FOLDER'], 'uploaded_image.png'), img_np)
+    cv2.imwrite(os.path.join(app.config['UPLOAD_FOLDER'], 'masked_gray_image.png'), img_np_masked)
+    cv2.imwrite(os.path.join(app.config['UPLOAD_FOLDER'], 'resized_gray_image.png'), img_resized_gray)
     cv2.imwrite(os.path.join(app.config['UPLOAD_FOLDER'], 'processed_image.png'), img_processed)
-    return img_processed, img_resized_gray_for_adapt
+
+    return img_processed, img_resized_gray
 
 # ------------------------- ヒント計算 -------------------------
 def calculate_line_hints(lines):
@@ -448,7 +448,7 @@ def upload_file():
         if file.filename == '':
             return 'ファイルが選択されていません'
 
-        img, img_gray = process_image(file.stream, size=(2, 2))
+        img, img_gray = process_image(file.stream)
         if img is None:
             return '無効な画像ファイルです'
 
