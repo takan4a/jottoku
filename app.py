@@ -2,11 +2,11 @@ import os
 from flask import Flask, render_template, request
 import cv2
 import numpy as np
-from rembg import remove
 from PIL import Image
 import io
 import subprocess
 import re
+import tempfile
 
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
@@ -18,7 +18,13 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # ------------------------- 画像処理関数 -------------------------
 def process_image(image_stream, size=(30, 30)):
     input_bytes = image_stream.read()
-    out_bytes = remove(input_bytes)
+    # rembg は重い依存があるため遅延インポートする（テスト時の副作用軽減）
+    try:
+        from rembg import remove
+        out_bytes = remove(input_bytes)
+    except Exception:
+        # rembg が利用できない場合は入力をそのまま使う
+        out_bytes = input_bytes
     img_pil = Image.open(io.BytesIO(out_bytes)).convert("RGBA")
     img_np_rgba = np.array(img_pil)
     img_np_rgb = img_np_rgba[:, :, :3]
@@ -190,6 +196,12 @@ def upload_file():
         height, width = img.shape
         grid = [[0 if img[y,x]!=0 else 1 for x in range(width)] for y in range(height)]
         row_hints, col_hints = get_hints(grid)
+        # 保存しておく（adapt_puzzle / solve で利用）
+        global LATEST_ROW_HINTS, LATEST_COL_HINTS, LATEST_WIDTH, LATEST_HEIGHT
+        LATEST_ROW_HINTS = row_hints
+        LATEST_COL_HINTS = col_hints
+        LATEST_HEIGHT = height
+        LATEST_WIDTH = width
         csp_filename = os.path.join(app.config['UPLOAD_FOLDER'], 'problem.csp')
         unicity_result = check_unicity(row_hints, col_hints, width, height, csp_filename)
 
@@ -204,3 +216,135 @@ def upload_file():
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+# ------------------------- パズル適応アルゴリズム -------------------------
+def run_sugar_with_constraints(row_hints, col_hints, width, height, extra_constraints, csp_path=None):
+    """補助: 一時CSPファイルを作り、追加制約を付けて sugar を実行する。"""
+    if csp_path is None:
+        tf = tempfile.NamedTemporaryFile(mode='w', suffix='.csp', delete=False, dir=app.config['UPLOAD_FOLDER'])
+        csp_path = tf.name
+        tf.close()
+    # ベースCSPを書き出す
+    if not generate_csp_file(row_hints, col_hints, width, height, csp_path):
+        return None, "Error: CSP生成失敗"
+
+    # 追加制約を追記
+    if extra_constraints:
+        with open(csp_path, 'a') as f:
+            f.write('\n')
+            for cons in extra_constraints:
+                f.write(cons + '\n')
+
+    try:
+        os.environ["PATH"] += ":/home/takana/projects/jottoku/sugar-2.3.4/bin"
+        result = subprocess.run(["sugar", csp_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return result.stdout + result.stderr, None
+    except FileNotFoundError:
+        return None, "Error: SugarまたはMiniSATが見つかりません。PATHを確認してください。"
+    except Exception as e:
+        return None, f"Error: 実行時エラー ({e})"
+
+
+def solve(current_image):
+    """簡易ソルバー: グローバルに保存された最新ヒントを用い、各マスが強制されるかを判定する。
+    返り値は同形の numpy 配列で、確定値は 0/1、未確定は -1 を返す。
+    注意: 小さなパズル向けの単純実装（各マスごとに2回SATチェック）。"""
+    try:
+        row_hints = LATEST_ROW_HINTS
+        col_hints = LATEST_COL_HINTS
+        height = LATEST_HEIGHT
+        width = LATEST_WIDTH
+    except NameError:
+        # ヒントが未保存の場合は、現在のグリッドをそのまま返す（未確定扱い）
+        arr = np.full_like(current_image, -1)
+        arr[current_image == 1] = 1
+        arr[current_image == 0] = -1
+        return arr
+
+    solution = np.full((height, width), -1, dtype=int)
+
+    # 既に確定しているセルはそのまま反映
+    solution[current_image == 1] = 1
+    solution[current_image == 0] = -1
+
+    # 各未確定セルについて、0/1 を強制したときにSATかを確認
+    for y in range(height):
+        for x in range(width):
+            if current_image[y][x] == 1:
+                solution[y][x] = 1
+                continue
+            # 既に黒にして試行中のセルも -1 として扱う
+            # 0 を強制してSATか確認
+            cons0 = [f"(= x_{y}_{x} 0)"]
+            out0, err0 = run_sugar_with_constraints(row_hints, col_hints, width, height, cons0)
+            sat0 = False
+            if out0 is not None and "UNSATISFIABLE" not in out0:
+                sat0 = True
+
+            # 1 を強制してSATか確認
+            cons1 = [f"(= x_{y}_{x} 1)"]
+            out1, err1 = run_sugar_with_constraints(row_hints, col_hints, width, height, cons1)
+            sat1 = False
+            if out1 is not None and "UNSATISFIABLE" not in out1:
+                sat1 = True
+
+            if sat0 and not sat1:
+                solution[y][x] = 0
+            elif sat1 and not sat0:
+                solution[y][x] = 1
+            else:
+                solution[y][x] = -1
+
+    return solution
+
+
+def adapt_puzzle(current_image, original_gray_image, alpha=8.0, beta=1.0):
+    """
+    Algorithm 5: AdaptPuzzle の実装
+    current_image: 現在の白黒パズル (0:白, 1:黒)
+    original_gray_image: 元のグレースケール画像 (0:黒 〜 255:白)
+    """
+
+    current_solution = solve(current_image.copy())
+
+    # すでに全てのマスが確定していれば終了
+    if count_unknowns(current_solution) == 0:
+        return current_image
+
+    best_cell = None
+    min_value = float('inf')
+
+    height, width = current_image.shape
+
+    for y in range(height):
+        for x in range(width):
+            # 条件: 現在白マスかつソルバーが未確定
+            if current_image[y][x] == 0 and current_solution[y][x] == -1:
+                # 一時的に黒にして試す
+                current_image[y][x] = 1
+                simulated_solution = solve(current_image.copy())
+                num_unknowns = count_unknowns(simulated_solution)
+
+                pixel_intensity = int(original_gray_image[y][x])
+
+                value = (alpha * num_unknowns) + (beta * pixel_intensity)
+
+                if value < min_value:
+                    min_value = value
+                    best_cell = (y, x)
+
+                # 元に戻す
+                current_image[y][x] = 0
+
+    if best_cell:
+        best_y, best_x = best_cell
+        current_image[best_y][best_x] = 1
+        print(f"Selected cell ({best_x}, {best_y}) with score {min_value}")
+    else:
+        print("変更可能な候補がありません（エラーまたは完了）")
+
+    return current_image
+
+
+def count_unknowns(solution):
+    return int((solution == -1).sum())
