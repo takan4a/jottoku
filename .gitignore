@@ -10,3 +10,4 @@ node_modules/
 *.class
 *.jar
 target/
+test_program/

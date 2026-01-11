@@ -119,6 +119,9 @@
         
         {% if unicity == 'Unique' %}
             ✅ このヒントを持つパズルの解は**一意**です。
+            {% if adaptation_log %}
+                <br><small>（{{ adaptation_log|length }}回の適応により一意解を達成）</small>
+            {% endif %}
         {% elif unicity == 'Multiple' %}
             ⚠️ このヒントを持つパズルの解は**複数**存在します。
         {% elif unicity == 'NoSolution' %}
@@ -175,6 +178,44 @@
         </table>
     </div>
     
+    {% if adaptation_log %}
+    <div style="margin-top: 30px; padding: 20px; background-color: #fff; border-radius: 8px; max-width: 600px;">
+        <h3 style="margin-top: 0;">適応ログ</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="background-color: #f0f0f0;">
+                    <th style="padding: 8px; border: 1px solid #ddd;">イテレーション</th>
+                    <th style="padding: 8px; border: 1px solid #ddd;">一意性</th>
+                    <th style="padding: 8px; border: 1px solid #ddd;">黒マス数</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log_entry in adaptation_log %}
+                    <tr>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">
+                            {% if log_entry.iteration %}{{ log_entry.iteration }}{% else %}-{% endif %}
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">
+                            {% if log_entry.unicity %}
+                                <span class="{% if log_entry.unicity == 'Unique' %}unique{% elif log_entry.unicity == 'Multiple' %}multiple{% else %}nosolution{% endif %}" style="padding: 2px 8px; border-radius: 4px; font-size: 0.9em;">
+                                    {{ log_entry.unicity }}
+                                </span>
+                            {% elif log_entry.error %}
+                                <span style="color: red;">{{ log_entry.error }}</span>
+                            {% elif log_entry.warning %}
+                                <span style="color: orange;">{{ log_entry.warning }}</span>
+                            {% else %}-{% endif %}
+                        </td>
+                        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">
+                            {% if log_entry.black_cells %}{{ log_entry.black_cells }}{% else %}-{% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+
     <hr>
     <a href="/">↩️ 別の画像をアップロードする</a>
 
