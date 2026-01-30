@@ -23,13 +23,13 @@ LATEST_WIDTH = None
 LATEST_HEIGHT = None
 LATEST_GRAY_IMAGE = None
 LATEST_BINARY_IMAGE = None  # 元の二値化画像（解となる画像）
-NONOGRAM_SIZE = (2, 2)  # デフォルトのパズルサイズ
+NONOGRAM_SIZE = (10, 10)  # デフォルトのパズルサイズ
 
 # ------------------------- 画像処理関数 -------------------------
 def process_image(image_stream, size=NONOGRAM_SIZE):
     input_bytes = image_stream.read()
     img_np = cv2.imdecode(np.frombuffer(input_bytes, np.uint8), cv2.IMREAD_UNCHANGED)
-    img_np_removed = remove(img_np)
+    img_np_removed = cv2.cvtColor(remove(cv2.cvtColor(img_np, cv2.COLOR_BGR2RGBA)), cv2.COLOR_RGBA2BGRA)
     
     img_np_rgb = img_np_removed[:, :, :3]
     img_np_gray = cv2.cvtColor(img_np_rgb, cv2.COLOR_BGR2GRAY)
@@ -92,8 +92,7 @@ def generate_csp_file(row_hints, col_hints, width, height, csp_filename):
                 if hints == [0]:
                     continue
                 for i, size in enumerate(hints):
-                    max_pos = width - size
-                    f.write(f"(int h_{y}_{i} 0 {max_pos})\n")
+                    f.write(f"(int h_{y}_{i} 0 {width - size})\n")
             f.write("\n")
 
             # 3. 列ブロック変数
@@ -101,83 +100,52 @@ def generate_csp_file(row_hints, col_hints, width, height, csp_filename):
                 if hints == [0]:
                     continue
                 for i, size in enumerate(hints):
-                    max_pos = height - size
-                    f.write(f"(int v_{x}_{i} 0 {max_pos})\n")
+                    f.write(f"(int v_{x}_{i} 0 {height - size})\n")
             f.write("\n")
 
-            # 4. 行ブロックの順序制約（間隔1以上）
+            # 4. 行ブロック順序制約
             for y, hints in enumerate(row_hints):
-                for i in range(len(hints)-1):
+                if hints == [0]:
+                    continue
+                for i in range(len(hints) - 1):
                     f.write(f"(<= (+ h_{y}_{i} {hints[i]} 1) h_{y}_{i+1})\n")
-            # 5. 列ブロックの順序制約
+
+            # 5. 列ブロック順序制約
             for x, hints in enumerate(col_hints):
-                for i in range(len(hints)-1):
+                if hints == [0]:
+                    continue
+                for i in range(len(hints) - 1):
                     f.write(f"(<= (+ v_{x}_{i} {hints[i]} 1) v_{x}_{i+1})\n")
 
             f.write("\n")
-            
-            # 制約を記録するためのセット（重複防止）
-            cell_constraints = {}  # (y, x) -> list of constraints
 
-            # 6. 行マス変数とブロック位置の関係
+            # 6. 行セル制約
             for y, hints in enumerate(row_hints):
-                if hints == [0]:
-                    for x in range(width):
-                        if (y, x) not in cell_constraints:
-                            cell_constraints[(y, x)] = []
-                        cell_constraints[(y, x)].append(('row_zero', None))
-                else:
-                    for x in range(width):
-                        clauses = []
-                        for i, size in enumerate(hints):
-                            clauses.append(f"(and (<= h_{y}_{i} {x}) (< {x} (+ h_{y}_{i} {size})))")
-                        if (y, x) not in cell_constraints:
-                            cell_constraints[(y, x)] = []
-                        cell_constraints[(y, x)].append(('row_iff', ' '.join(clauses)))
-
-            # 7. 列マス変数とブロック位置の関係
-            for x, hints in enumerate(col_hints):
-                if hints == [0]:
-                    for y in range(height):
-                        if (y, x) not in cell_constraints:
-                            cell_constraints[(y, x)] = []
-                        cell_constraints[(y, x)].append(('col_zero', None))
-                else:
-                    for y in range(height):
-                        clauses = []
-                        for i, size in enumerate(hints):
-                            clauses.append(f"(and (<= v_{x}_{i} {y}) (< {y} (+ v_{x}_{i} {size})))")
-                        if (y, x) not in cell_constraints:
-                            cell_constraints[(y, x)] = []
-                        cell_constraints[(y, x)].append(('col_iff', ' '.join(clauses)))
-
-            # 8. 制約を統合して出力
-            for y in range(height):
                 for x in range(width):
-                    constraints = cell_constraints.get((y, x), [])
-
-                    # row_zero または col_zero がある場合は x_{y}_{x} = 0
-                    has_zero = any(c[0] in ['row_zero', 'col_zero'] for c in constraints)
-                    if has_zero:
+                    if hints == [0]:
                         f.write(f"(= x_{y}_{x} 0)\n")
                         continue
 
-                    # 両方の iff 制約を結合
-                    row_clauses = [c[1] for c in constraints if c[0] == 'row_iff']
-                    col_clauses = [c[1] for c in constraints if c[0] == 'col_iff']
+                    ors = [
+                        f"(and (<= h_{y}_{i} {x}) (< {x} (+ h_{y}_{i} {size})))"
+                        for i, size in enumerate(hints)
+                    ]
+                    f.write(f"(iff (= x_{y}_{x} 1) (or {' '.join(ors)}))\n")
 
-                    all_clauses = []
-                    if row_clauses:
-                        all_clauses.extend([f"(or {c})" for c in row_clauses])
-                    if col_clauses:
-                        all_clauses.extend([f"(or {c})" for c in col_clauses])
+            f.write("\n")
 
-                    if all_clauses:
-                        if len(all_clauses) == 1:
-                            f.write(f"(iff (= x_{y}_{x} 1) {all_clauses[0]})\n")
-                        else:
-                            # 行と列の両方の制約を AND で結合
-                            f.write(f"(iff (= x_{y}_{x} 1) (and {' '.join(all_clauses)}))\n")
+            # 7. 列セル制約
+            for x, hints in enumerate(col_hints):
+                for y in range(height):
+                    if hints == [0]:
+                        f.write(f"(= x_{y}_{x} 0)\n")
+                        continue
+
+                    ors = [
+                        f"(and (<= v_{x}_{i} {y}) (< {y} (+ v_{x}_{i} {size})))"
+                        for i, size in enumerate(hints)
+                    ]
+                    f.write(f"(iff (= x_{y}_{x} 1) (or {' '.join(ors)}))\n")
 
         return True
 
@@ -185,6 +153,7 @@ def generate_csp_file(row_hints, col_hints, width, height, csp_filename):
         import traceback
         traceback.print_exc()
         return False
+
 
 # ------------------------- 一意性チェック -------------------------
 def check_unicity(row_hints, col_hints, width, height, csp_filename, fixed_cells=None):
@@ -231,7 +200,7 @@ def check_unicity(row_hints, col_hints, width, height, csp_filename, fixed_cells
         result2 = subprocess.run(["sugar", csp_filename],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         out2 = result2.stdout + result2.stderr
-        
+    
         if "UNSATISFIABLE" in out2:
             return "Unique"
         elif "SATISFIABLE" in out2:
@@ -271,20 +240,21 @@ def run_sugar_with_constraints(row_hints, col_hints, width, height, extra_constr
         return None, f"Error: 実行時エラー ({e})"
 
 # ------------------------- solve / adapt_puzzle / count_unknowns -------------------------
-def solve(current_image):
+def solve(current_state):
     """
     Sugarソルバーを使用して、各マスが論理的推論で確定可能かを判定
 
-    current_image: 現在の固定セル（0=固定なし, 1=黒マス固定）
+    current_state: 現在の確定状態 (-1=未確定, 0=白確定, 1=黒確定)
     返り値: numpy配列 (0=白確定, 1=黒確定, -1=未確定)
     """
     global LATEST_ROW_HINTS, LATEST_COL_HINTS, LATEST_WIDTH, LATEST_HEIGHT
 
     # ヒントが未保存の場合は、現在のグリッドをそのまま返す（未確定扱い）
     if LATEST_ROW_HINTS is None or LATEST_COL_HINTS is None:
-        arr = np.full_like(current_image, -1, dtype=int)
-        # 黒マスはそのまま保持
-        arr[current_image == 1] = 1
+        arr = np.full_like(current_state, -1, dtype=int)
+        # 確定マスはそのまま保持
+        arr[current_state == 0] = 0
+        arr[current_state == 1] = 1
         return arr
 
     row_hints = LATEST_ROW_HINTS
@@ -292,33 +262,34 @@ def solve(current_image):
     height = LATEST_HEIGHT
     width = LATEST_WIDTH
 
-    # 初期化: 既に黒マスとして固定されているセルは1、それ以外は未確定
-    solution = np.full((height, width), -1, dtype=int)
+    # 初期化: 確定済みセルを保持、それ以外は未確定
+    solution = current_state.copy()
 
-    # current_imageで既に黒マスになっているセルを制約として扱う
-    forced_black_constraints = []
+    # current_stateで既に確定しているセルを制約として扱う
+    forced_constraints = []
     for y in range(height):
         for x in range(width):
-            if current_image[y][x] == 1:
-                forced_black_constraints.append(f"(= x_{y}_{x} 1)")
-                solution[y][x] = 1
+            if current_state[y][x] == 0:
+                forced_constraints.append(f"(= x_{y}_{x} 0)")
+            elif current_state[y][x] == 1:
+                forced_constraints.append(f"(= x_{y}_{x} 1)")
 
-    # 各白マス（未確定）について、0/1 を強制したときにSATかを確認
+    # 各未確定マスについて、0/1 を強制したときにSATかを確認
     for y in range(height):
         for x in range(width):
-            # 既に黒マスの場合はスキップ
-            if current_image[y][x] == 1:
+            # 既に確定している場合はスキップ
+            if current_state[y][x] != -1:
                 continue
 
             # 0 を強制してSATか確認
-            cons0 = forced_black_constraints + [f"(= x_{y}_{x} 0)"]
+            cons0 = forced_constraints + [f"(= x_{y}_{x} 0)"]
             out0, err0 = run_sugar_with_constraints(row_hints, col_hints, width, height, cons0)
             sat0 = False
             if out0 is not None and "UNSATISFIABLE" not in out0:
                 sat0 = True
 
             # 1 を強制してSATか確認
-            cons1 = forced_black_constraints + [f"(= x_{y}_{x} 1)"]
+            cons1 = forced_constraints + [f"(= x_{y}_{x} 1)"]
             out1, err1 = run_sugar_with_constraints(row_hints, col_hints, width, height, cons1)
             sat1 = False
             if out1 is not None and "UNSATISFIABLE" not in out1:
@@ -338,11 +309,11 @@ def count_unknowns(solution):
     return int((solution == -1).sum())
 
 
-def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=None, alpha=8.0, beta=1.0):
+def adapt_puzzle(current_state, original_binary_image=None, original_gray_image=None, alpha=8.0, beta=1.0):
     """
     論文の正しいAdaptPuzzleアルゴリズム (Algorithm 5)
 
-    current_image: 現在の固定セル (0:固定なし, 1:黒マス固定)
+    current_state: 現在の確定状態 (-1:未確定, 0:白確定, 1:黒確定)
     original_binary_image: 元の二値化画像（解となる画像） (0:白, 1:黒)
     original_gray_image: 元のグレースケール画像 (0:黒 〜 255:白)
     alpha: 未確定マス数の重み
@@ -353,7 +324,7 @@ def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=
     2. 未確定マス（P_ij = -1）かつ元画像で白マス（I_ij = 0）のマスを列挙
     3. 各候補マスを黒マスに固定した場合、solve()を実行して未確定マス数を計算
     4. Value = α×未確定マス数 + β×グレースケール濃度 を計算
-    5. 最小Valueのマスを選択し、黒マスに固定
+    5. 最小Valueのマスを選択し、黒マスに固定（状態を1に変更）
     """
     global LATEST_GRAY_IMAGE, LATEST_BINARY_IMAGE
 
@@ -362,24 +333,24 @@ def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=
         original_binary_image = LATEST_BINARY_IMAGE
         if original_binary_image is None:
             print("Error: 元の二値化画像が利用できません")
-            return current_image
+            return current_state
 
     if original_gray_image is None:
         original_gray_image = LATEST_GRAY_IMAGE
         if original_gray_image is None:
             print("Error: グレースケール画像が利用できません")
-            return current_image
+            return current_state
 
     # 現在の状態をコピーして作業
-    current_image = current_image.copy()
+    current_state = current_state.copy()
 
     # 現在の確定/未確定マスを判定（論理的推論による）
     print("現在のパズル状態を解析中...")
-    current_solution = solve(current_image)
+    current_solution = solve(current_state)
     num_unknowns = count_unknowns(current_solution)
     print(f"現在の未確定マス数: {num_unknowns}")
 
-    height, width = current_image.shape
+    height, width = current_state.shape
 
     # 候補マスを列挙: 未確定（P_ij = -1）かつ元画像で白マス（I_ij = 0）
     candidates = []
@@ -391,7 +362,7 @@ def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=
 
     if not candidates:
         print("候補マスが見つかりません（全てのマスが確定済み、または元画像が全て黒マス）")
-        return current_image
+        return current_state
 
     print(f"候補マス数: {len(candidates)}")
 
@@ -401,11 +372,11 @@ def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=
 
     for y, x in candidates:
         # このマスを黒マスに固定して、未確定マス数を計算
-        test_image = current_image.copy()
-        test_image[y][x] = 1
+        test_state = current_state.copy()
+        test_state[y][x] = 1
 
         # solve()を実行して未確定マス数を計算
-        test_solution = solve(test_image)
+        test_solution = solve(test_state)
         test_unknowns = count_unknowns(test_solution)
 
         # グレースケール濃度（暗いほど小さい値）
@@ -424,11 +395,12 @@ def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=
 
     if best_cell:
         best_y, best_x = best_cell
-        current_image[best_y][best_x] = 1
+        current_state[best_y][best_x] = 1
         print(f"選択: ({best_x}, {best_y}), Value={min_value:.1f}")
 
         # 選択後にヒント違反がないか確認
-        test_grid = [[int(current_image[y,x]) for x in range(width)] for y in range(height)]
+        # 注: ヒント生成には黒確定マス(1)のみを使用
+        test_grid = [[int(current_state[y,x]) if current_state[y,x] == 1 else 0 for x in range(width)] for y in range(height)]
         test_row_hints, test_col_hints = get_hints(test_grid)
         global LATEST_ROW_HINTS, LATEST_COL_HINTS
         if test_row_hints != LATEST_ROW_HINTS or test_col_hints != LATEST_COL_HINTS:
@@ -436,7 +408,7 @@ def adapt_puzzle(current_image, original_binary_image=None, original_gray_image=
     else:
         print("変更可能な候補がありません")
 
-    return current_image
+    return current_state
 
 # ------------------------- Flask ルート -------------------------
 @app.route('/', methods=['GET', 'POST'])
@@ -448,12 +420,12 @@ def upload_file():
         if file.filename == '':
             return 'ファイルが選択されていません'
 
-        img, img_gray = process_image(file.stream)
-        if img is None:
+        img_processed, img_resized_gray = process_image(file.stream)
+        if img_processed is None:
             return '無効な画像ファイルです'
 
-        height, width = img.shape
-        grid = [[0 if img[y,x]!=0 else 1 for x in range(width)] for y in range(height)]
+        height, width = img_processed.shape
+        grid = [[0 if img_processed[y,x]!=0 else 1 for x in range(width)] for y in range(height)]
         row_hints, col_hints = get_hints(grid)
 
         # 元の二値化画像を保存（解となる画像: 0=白, 1=黒）
@@ -465,7 +437,7 @@ def upload_file():
         LATEST_COL_HINTS = col_hints
         LATEST_HEIGHT = height
         LATEST_WIDTH = width
-        LATEST_GRAY_IMAGE = img_gray
+        LATEST_GRAY_IMAGE = img_resized_gray
         LATEST_BINARY_IMAGE = binary_image
         csp_filename = os.path.join(app.config['UPLOAD_FOLDER'], 'problem.csp')
         unicity_result = check_unicity(row_hints, col_hints, width, height, csp_filename)
@@ -477,8 +449,8 @@ def upload_file():
         if unicity_result == "Multiple":
             print("複数解が検出されました。一意解になるまで適応を開始します...")
 
-            # 固定セルマトリックスを初期化（初期状態はすべて0=固定なし）
-            fixed_cells = np.zeros((height, width), dtype=int)
+            # 状態マトリックスを初期化（初期状態はすべて-1=未確定）
+            current_state = np.full((height, width), -1, dtype=int)
             previous_fixed_count = 0
 
             for iteration in range(max_iterations):
@@ -489,32 +461,36 @@ def upload_file():
                     LATEST_ROW_HINTS = row_hints
                     LATEST_COL_HINTS = col_hints
 
-                    # adapt_puzzle を実行（固定セル、元の二値化画像、グレースケール画像を渡す）
-                    previous_fixed = fixed_cells.copy()
-                    fixed_cells = adapt_puzzle(fixed_cells, binary_image, img_gray)
+                    # adapt_puzzle を実行（現在状態、元の二値化画像、グレースケール画像を渡す）
+                    previous_state = current_state.copy()
+                    current_state = adapt_puzzle(current_state, binary_image, img_resized_gray)
 
-                    # 固定セルに変化がない場合
-                    if np.array_equal(fixed_cells, previous_fixed):
+                    # 状態に変化がない場合
+                    if np.array_equal(current_state, previous_state):
+                        # check_unicity用に黒マス固定のみを抽出
+                        fixed_blacks = np.where(current_state == 1, 1, 0)
                         # 一意性をチェック（全マス確定なら一意解の可能性）
-                        final_unicity = check_unicity(row_hints, col_hints, width, height, csp_filename, fixed_cells)
+                        final_unicity = check_unicity(row_hints, col_hints, width, height, csp_filename, fixed_blacks)
                         if final_unicity == "Unique":
                             print(f"一意解を達成しました（{iteration + 1} 回の適応）")
-                            grid = [[int(fixed_cells[y,x]) for x in range(width)] for y in range(height)]
+                            grid = [[int(current_state[y,x]) if current_state[y,x] != -1 else 0 for x in range(width)] for y in range(height)]
                             unicity_result = "Unique"
                             adaptation_log.append({
                                 'iteration': iteration + 1,
                                 'unicity': 'Unique',
-                                'black_cells': int(np.sum(fixed_cells))
+                                'black_cells': int(np.sum(fixed_blacks))
                             })
                         else:
                             print(f"警告: 変更なしで終了（一意性: {final_unicity}）")
                             adaptation_log.append({'warning': f'変更なし（一意性: {final_unicity}）'})
                         break
 
+                    # check_unicity用に黒マス固定のみを抽出
+                    fixed_blacks = np.where(current_state == 1, 1, 0)
                     # 一意性を再チェック（元のヒント + 固定セル制約で）
-                    new_unicity = check_unicity(row_hints, col_hints, width, height, csp_filename, fixed_cells)
-                    current_fixed_count = int(np.sum(fixed_cells))
-                    print(f"一意性チェック結果: {new_unicity}, 固定セル数: {current_fixed_count}")
+                    new_unicity = check_unicity(row_hints, col_hints, width, height, csp_filename, fixed_blacks)
+                    current_fixed_count = int(np.sum(fixed_blacks))
+                    print(f"一意性チェック結果: {new_unicity}, 黒マス固定数: {current_fixed_count}")
 
                     adaptation_log.append({
                         'iteration': iteration + 1,
@@ -524,17 +500,16 @@ def upload_file():
 
                     if new_unicity == "Unique":
                         print(f"一意解を達成しました（{iteration + 1} 回の適応）")
-                        # 固定セルを反映したグリッドを作成
-                        # 注意: gridは元のパズルの解の1つを示すが、fixed_cellsによって一意になっている
-                        grid = [[int(fixed_cells[y,x]) for x in range(width)] for y in range(height)]
+                        # 状態を反映したグリッドを作成
+                        grid = [[int(current_state[y,x]) if current_state[y,x] != -1 else 0 for x in range(width)] for y in range(height)]
                         # ヒントは元のまま（変更しない）
                         unicity_result = "Unique"
                         break
                     elif new_unicity == "NoSolution":
                         print("エラー: 解が存在しなくなりました。適応を中止します。")
                         adaptation_log.append({'error': '解なし'})
-                        # 前回の固定セルに戻す
-                        fixed_cells = previous_fixed
+                        # 前回の状態に戻す
+                        current_state = previous_state
                         break
                     elif new_unicity == "Multiple":
                         # 固定セルが増えていない場合は警告
